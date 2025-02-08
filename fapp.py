@@ -1,174 +1,125 @@
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse
 import cv2
 import numpy as np
+import uvicorn
+import threading
 import io
-import os
 
 app = FastAPI()
 
-# Directories to store reference images and videos for feature matching
-REFERENCE_IMAGES_DIR = "images"
-REFERENCE_VIDEOS_DIR = "videos"
-os.makedirs(REFERENCE_IMAGES_DIR, exist_ok=True)
-os.makedirs(REFERENCE_VIDEOS_DIR, exist_ok=True)
+# Load reference images and their corresponding videos
+image_video_mapping = {
+    "images/image_1.jpg": "videos/image_1.mp4",
+    "images/image_2.jpg": "videos/image_2.mp4",
+}
 
-# Load your feature database
-# Store both features and corresponding video paths
-db_features = []
+# Initialize ORB detector
+orb = cv2.ORB_create()
 
-
-def extract_features(image):
-    # Use ORB for feature detection (you can switch to Kornia or LightGlue)
-    orb = cv2.ORB_create()
+# Load reference images and compute keypoints/descriptors
+reference_data = {}
+for image_path, video_path in image_video_mapping.items():
+    image = cv2.imread(image_path, 0)
     keypoints, descriptors = orb.detectAndCompute(image, None)
-    return keypoints, descriptors
+    reference_data[image_path] = {
+        "image": image,
+        "keypoints": keypoints,
+        "descriptors": descriptors,
+        "video": video_path
+    }
+
+# Initialize BFMatcher
+bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+
+# Global variables for video processing
+current_video = None
+video_capture = None
+cap = None
 
 
-def load_reference_data():
-    global db_features
-    db_features = []
-    for filename in os.listdir(REFERENCE_IMAGES_DIR):
-        if filename.lower().endswith((".png", ".jpg", ".jpeg")):
-            image_path = os.path.join(REFERENCE_IMAGES_DIR, filename)
-            video_path = os.path.join(REFERENCE_VIDEOS_DIR, os.path.splitext(filename)[0] + ".mp4")
-            if os.path.exists(video_path):
-                image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-                keypoints, descriptors = extract_features(image)
-                db_features.append((keypoints, descriptors, video_path))
+def video_processing():
+    global cap, video_capture, current_video
 
+    cap = cv2.VideoCapture(0)
 
-# Load existing reference images and videos on startup
-load_reference_data()
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        keypoints_frame, descriptors_frame = orb.detectAndCompute(gray_frame, None)
 
-@app.post("/upload_reference/")
-async def upload_reference_image(file: UploadFile = File(...), video: UploadFile = File(...)):
-    image_path = os.path.join(REFERENCE_IMAGES_DIR, file.filename)
-    video_path = os.path.join(REFERENCE_VIDEOS_DIR, os.path.splitext(file.filename)[0] + ".mp4")
+        if descriptors_frame is None:
+            continue
 
-    with open(image_path, "wb") as img_buffer:
-        img_buffer.write(await file.read())
+        for ref_image_path, data in reference_data.items():
+            if data["descriptors"] is None:
+                continue
 
-    with open(video_path, "wb") as vid_buffer:
-        vid_buffer.write(await video.read())
+            if descriptors_frame.dtype != data["descriptors"].dtype:
+                descriptors_frame = descriptors_frame.astype(data["descriptors"].dtype)
 
-    load_reference_data()
-    return JSONResponse(content={"message": "Reference image and video uploaded, features extracted successfully."})
+            matches = bf.match(data["descriptors"], descriptors_frame)
+            matches = sorted(matches, key=lambda x: x.distance)
 
+            if len(matches) > 20:
+                src_pts = np.float32([data["keypoints"][m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+                dst_pts = np.float32([keypoints_frame[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
 
-def match_features(descriptors, db_descriptors):
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-    matches = bf.match(descriptors, db_descriptors)
-    matches = sorted(matches, key=lambda x: x.distance)
-    return matches
+                M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+                h, w = data["image"].shape
+                pts = np.float32([[0, 0], [0, h], [w, h], [w, 0]]).reshape(-1, 1, 2)
+                dst = cv2.perspectiveTransform(pts, M)
 
+                frame = cv2.polylines(frame, [np.int32(dst)], True, (255, 0, 0), 3, cv2.LINE_AA)
 
-@app.get("/video")
-async def video_feed():
-    def generate():
-        cap = cv2.VideoCapture(0)
-
-        # Load YOLOv4-tiny for mobile phone detection
-        net = cv2.dnn.readNet("yolov4-tiny.weights", "yolov4-tiny.cfg")
-        layer_names = net.getLayerNames()
-
-        # Fix the output layer extraction to handle scalar outputs
-        try:
-            output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers().flatten()]
-        except AttributeError:
-            output_layers = [layer_names[i[0] - 1] for i in net.getUnconnectedOutLayers()]
-
-        with open("coco.names", "r") as f:
-            classes = [line.strip() for line in f.readlines()]
-
-        video_caps = {}
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
+                if current_video != ref_image_path:
+                    if video_capture:
+                        video_capture.release()
+                    video_capture = cv2.VideoCapture(data["video"])
+                    current_video = ref_image_path
                 break
+        else:
+            current_video = None
+            if video_capture:
+                video_capture.release()
+                video_capture = None
 
-            height, width, channels = frame.shape
+        if video_capture and video_capture.isOpened():
+            ret_vid, video_frame = video_capture.read()
+            if ret_vid and 'dst' in locals():
+                video_frame_resized = cv2.resize(video_frame, (w, h))
+                warped_video = cv2.warpPerspective(video_frame_resized, M, (frame.shape[1], frame.shape[0]))
 
-            # Prepare the frame for YOLO
-            blob = cv2.dnn.blobFromImage(frame, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
-            net.setInput(blob)
-            outs = net.forward(output_layers)
+                mask = np.zeros((frame.shape[0], frame.shape[1]), dtype=np.uint8)
+                cv2.fillConvexPoly(mask, np.int32(dst), 255)
+                mask_inv = cv2.bitwise_not(mask)
 
-            class_ids = []
-            confidences = []
-            boxes = []
+                frame_bg = cv2.bitwise_and(frame, frame, mask=mask_inv)
+                video_fg = cv2.bitwise_and(warped_video, warped_video, mask=mask)
 
-            for out in outs:
-                for detection in out:
-                    scores = detection[5:]
-                    class_id = np.argmax(scores)
-                    confidence = scores[class_id]
-                    if confidence > 0.5 and classes[class_id] == "cell phone":
-                        center_x = int(detection[0] * width)
-                        center_y = int(detection[1] * height)
-                        w = int(detection[2] * width)
-                        h = int(detection[3] * height)
+                final_frame = cv2.add(frame_bg, video_fg)
+            else:
+                final_frame = frame
+        else:
+            final_frame = frame
 
-                        x = int(center_x - w / 2)
-                        y = int(center_y - h / 2)
+        _, jpeg = cv2.imencode('.jpg', final_frame)
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
 
-                        boxes.append([x, y, w, h])
-                        confidences.append(float(confidence))
-                        class_ids.append(class_id)
+    cap.release()
+    if video_capture:
+        video_capture.release()
+    cv2.destroyAllWindows()
 
-            indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.5, 0.4)
 
-            for i in range(len(boxes)):
-                if i in indexes:
-                    x, y, w, h = boxes[i]
-                    roi_color = frame[y:y + h, x:x + w]
-                    keypoints, descriptors = extract_features(roi_color)
+@app.get("/video_feed")
+async def video_feed():
+    return StreamingResponse(video_processing(), media_type='multipart/x-mixed-replace; boundary=frame')
 
-                    if db_features:
-                        for db_keypoints, db_descriptors, video_path in db_features:
-                            matches = match_features(descriptors, db_descriptors)
-                            if matches and len(matches) > 10:  # Ensure sufficient matches for better accuracy
-                                if video_path not in video_caps:
-                                    video_caps[video_path] = cv2.VideoCapture(video_path)
 
-                                video_cap = video_caps[video_path]
-                                v_ret, video_frame = video_cap.read()
-
-                                if v_ret:
-                                    # Resize the video frame to fit the detected phone screen
-                                    video_frame_resized = cv2.resize(video_frame, (w, h))
-
-                                    # Adjust height if video frame doesn't fit perfectly
-                                    frame_h, frame_w = frame[y:y + h, x:x + w].shape[:2]
-                                    video_h, video_w = video_frame_resized.shape[:2]
-
-                                    if video_h > frame_h:
-                                        video_frame_resized = video_frame_resized[:frame_h, :]
-                                    elif video_h < frame_h:
-                                        padding = frame_h - video_h
-                                        video_frame_resized = cv2.copyMakeBorder(video_frame_resized, 0, padding, 0, 0,
-                                                                                 cv2.BORDER_CONSTANT, value=(0, 0, 0))
-
-                                    # Create a mask for the phone screen area
-                                    mask = frame.copy()
-                                    mask[y:y + video_frame_resized.shape[0],
-                                    x:x + video_frame_resized.shape[1]] = video_frame_resized
-
-                                    # Blend the original frame with the video overlay
-                                    alpha = 0.7  # Transparency factor
-                                    frame = cv2.addWeighted(frame, 1 - alpha, mask, alpha, 0)
-                                break
-
-                    # Draw rectangle around detected phone
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                    cv2.putText(frame, "Cell Phone", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-
-            _, img_encoded = cv2.imencode('.jpg', frame)
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + img_encoded.tobytes() + b'\r\n')
-
-    return StreamingResponse(generate(), media_type='multipart/x-mixed-replace; boundary=frame')
-
-# Run the server with: uvicorn feature_matching_api:app --reload
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)

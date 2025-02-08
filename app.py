@@ -25,17 +25,19 @@ logging.basicConfig(
 # Parameters
 FEATURE_DIM = 2048
 N_TREES = 50  # Increased for better accuracy
-DISTANCE_THRESHOLD = 1.0
+DISTANCE_THRESHOLD = 1.5
 VIDEO_PLAYBACK_SPEED = 1.0
 
 # Parallelogram Thresholds
 parallelogram_thresholds = {
-    'length_diff_ratio': 0.75,
-    'parallelism_ratio': 0.75
+    'length_diff_ratio': 1.0,
+    'parallelism_ratio': 1.0
 }
 
 # Stability Parameters
 MATCH_STABILITY_THRESHOLD = 3  # Number of consecutive frames required for a stable match
+GOOD_MATCH_DISTANCE_THRESHOLD = 35  # Adjust as needed
+
 
 # ------------------------ Main Application ------------------------
 
@@ -59,10 +61,10 @@ def main():
 
     # Initialize ORB for keypoint detection and matching
     orb = cv2.ORB_create(
-        nfeatures=15000,
+        nfeatures=1000,
         scaleFactor=1.2,
-        nlevels=20,
-        edgeThreshold=31,
+        nlevels=10,
+        edgeThreshold=15,
         firstLevel=0,
         WTA_K=2,
         scoreType=cv2.ORB_HARRIS_SCORE,
@@ -209,11 +211,10 @@ def main():
                                     logging.debug(f"Number of Matches: {len(matches)}")
 
                                     # Apply a good match distance threshold
-                                    GOOD_MATCH_DISTANCE_THRESHOLD = 50  # Adjust as needed
                                     good_matches = [m for m in matches if m.distance < GOOD_MATCH_DISTANCE_THRESHOLD]
                                     logging.debug(f"Number of Good Matches: {len(good_matches)}")
 
-                                    if len(good_matches) > 30:  # Increased threshold for better homography
+                                    if len(good_matches) > GOOD_MATCH_DISTANCE_THRESHOLD:  # Increased threshold for better homography
                                         # Compute homography
                                         src_pts = np.float32([kp_image[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
                                         dst_pts = np.float32([kp_frame[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
@@ -227,23 +228,23 @@ def main():
                                             dst = cv2.perspectiveTransform(pts, homography)
 
                                             # Validate if the detected quadrilateral is almost a parallelogram
-                                            if is_almost_parallelogram(dst, parallelogram_thresholds):
+                                            # if is_almost_parallelogram(dst, parallelogram_thresholds):
                                                 # Draw the detected region on the frame in green
-                                                if dst is not None and len(dst) == 4:
-                                                    cv2.polylines(frame, [np.int32(dst)], True, (0, 255, 0), 3, cv2.LINE_AA)
+                                            if dst is not None and len(dst) == 4:
+                                                cv2.polylines(frame, [np.int32(dst)], True, (0, 255, 0), 3, cv2.LINE_AA)
 
-                                                # Resize the video frame to match the detected image's size
-                                                frame_video_resized = resize_with_aspect_ratio(frame_video, width=w_img, height=h_img)
-                                                logging.debug(f"Resized video frame to: {frame_video_resized.shape}")
+                                            # Resize the video frame to match the detected image's size
+                                            frame_video_resized = resize_with_aspect_ratio(frame_video, width=w_img, height=h_img)
+                                            logging.debug(f"Resized video frame to: {frame_video_resized.shape}")
 
-                                                # Overlay the video frame onto the detected image
-                                                frame = overlay_video(frame, frame_video_resized, homography)
+                                            # Overlay the video frame onto the detected image
+                                            frame = overlay_video(frame, frame_video_resized, homography)
 
-                                                # Optional: Display a message
-                                                cv2.putText(frame, "Overlay Applied", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 
-                                                            1, (0, 255, 0), 2, cv2.LINE_AA)
-                                            else:
-                                                logging.warning("Detected quadrilateral is not a parallelogram. Skipping overlay.")
+                                            # Optional: Display a message
+                                            cv2.putText(frame, "Overlay Applied", (50, 50), cv2.FONT_HERSHEY_SIMPLEX,
+                                                        1, (0, 255, 0), 2, cv2.LINE_AA)
+                                            # else:
+                                            #     logging.warning("Detected quadrilateral is not a parallelogram. Skipping overlay.")
                                         else:
                                             logging.warning("Homography could not be computed or is invalid.")
                                     else:
