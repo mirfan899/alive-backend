@@ -1,3 +1,4 @@
+import collections
 import os
 
 import cv2
@@ -7,23 +8,29 @@ from pymilvus import connections, FieldSchema, CollectionSchema, DataType, Colle
 # Connect to Milvus
 from pymilvus import MilvusClient
 
-client = MilvusClient("milvus_demo.db")
 
+client = MilvusClient("milvus_demo.db")
 # Define Milvus collection schema
+collection_name = "image_collection"
+# Create or load collection
 fields = [
     FieldSchema(name="image_id", dtype=DataType.INT64, is_primary=True, auto_id=True),
-    FieldSchema(name="descriptors", dtype=DataType.FLOAT_VECTOR, dim=32000)  # ORB descriptors have 32 dimensions
+    FieldSchema(name="image_path", dtype=DataType.VARCHAR, max_length=1024),
+    FieldSchema(name="descriptors", dtype=DataType.FLOAT_VECTOR, dim=32000)
 ]
 schema = CollectionSchema(fields, description="Image descriptors")
-
-# Create or load collection
-collection_name = "image_collection"
+# Create collection with the schema
 if collection_name not in client.list_collections():
-    collection = client.create_collection(collection_schema=schema, collection_name="image_collection", dimension=32000)
-else:
-    collection = client.load_collection(collection_name=collection_name)
+    index_params = client.prepare_index_params()
+    index_params.add_index(
+        field_name="descriptors",
+        index_type="IVF_FLAT",
+        metric_type="L2",
+        params={"nlist": 128}
+    )
+    client.create_collection(collection_name=collection_name, schema=schema)
+    client.create_index(index_params=index_params, collection_name=collection_name)
 
-res = client.get_load_state(collection_name=collection_name)
 # Initialize ORB detector
 orb = cv2.ORB_create(nfeatures=1000,
         scaleFactor=1.2,
@@ -40,8 +47,15 @@ def insert_image_to_milvus(image_path, video_path):
     keypoints, descriptors = orb.detectAndCompute(image, None)
     if descriptors is not None:
         descriptors_flat = descriptors.astype(np.float32).flatten()
-        client.upsert(collection_name=collection_name, data=[descriptors_flat])
+
+        # Pad to 32,000 dimensions if necessary
+        if descriptors_flat.shape[0] < 32000:
+            padding = np.zeros(32000 - descriptors_flat.shape[0], dtype=np.float32)
+            descriptors_flat = np.concatenate([descriptors_flat, padding])
+
+        client.insert(collection_name=collection_name, data=[{"descriptors": descriptors_flat.tolist(), "image_path": image_path}])
         image_video_mapping[image_path] = video_path
+
 
 # Load images and videos from directories
 image_dir = "images"

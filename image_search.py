@@ -1,13 +1,13 @@
-from pymilvus import connections, Collection
+from pymilvus import connections, Collection, MilvusClient
 import cv2
 import numpy as np
 
 # Connect to Milvus
-connections.connect("default", host="localhost", port="19530")
+client = MilvusClient("milvus_demo.db")
+
 
 # Load collection
 collection_name = "image_collection"
-collection = Collection(name=collection_name)
 
 # Initialize ORB detector
 orb = cv2.ORB_create(nfeatures=1000,
@@ -19,27 +19,46 @@ orb = cv2.ORB_create(nfeatures=1000,
         scoreType=cv2.ORB_HARRIS_SCORE,
         patchSize=31)
 
-# Function to search image in Milvus
-def search_image_in_milvus(image_path):
-    image = cv2.imread(image_path, 0)
-    keypoints, descriptors = orb.detectAndCompute(image, None)
-    if descriptors is None:
-        print("No descriptors found in image.")
-        return
 
-    descriptors_flat = descriptors.astype(np.float32).flatten()
-    search_params = {
-        "data": [descriptors_flat],
-        "anns_field": "descriptors",
-        "param": {"metric_type": "L2", "params": {"nprobe": 10}},
-        "limit": 1
-    }
-    results = collection.search(**search_params)
+def search_image_in_milvus(query_image_path, top_k=1):
+    # Load and process the query image
+    query_image = cv2.imread(query_image_path, cv2.IMREAD_GRAYSCALE)
+    keypoints, descriptors = orb.detectAndCompute(query_image, None)
 
-    if results and results[0].distances[0] < 50.0:  # Adjust distance threshold as needed
-        print(f"Match found with ID: {results[0].ids[0]}, Distance: {results[0].distances[0]}")
+    if descriptors is not None:
+        descriptors_flat = descriptors.astype(np.float32).flatten()
+
+        # Pad to 32,000 dimensions if necessary (since this is how we inserted)
+        if descriptors_flat.shape[0] < 32000:
+            padding = np.zeros(32000 - descriptors_flat.shape[0], dtype=np.float32)
+            descriptors_flat = np.concatenate([descriptors_flat, padding])
+
+        # Perform search in Milvus
+        search_params = {
+            "metric_type": "L2",  # ORB uses L2 norm for similarity
+            "params": {"nlist": 10}  # nprobe controls the search scope
+        }
+
+        results = client.search(
+            collection_name=collection_name,
+            data=[descriptors_flat.tolist()],  # Pass the descriptors
+            anns_field="descriptors",
+            search_params=search_params,
+            limit=top_k,
+            output_fields=["image_id", "image_path"]  # You can retrieve additional fields if needed
+        )
+
+        # Display results
+        print(f"Top {top_k} matches for {query_image_path}:")
+        for hit in results[0]:  # results[0] because we only searched one image
+            print(f"Image Path: {hit['entity']['image_path']}, Distance: {hit['distance']}")
+
+        return results[0]  # Return the top results for further use
     else:
-        print("No matching image found.")
+        print(f"No descriptors found in {query_image_path}.")
+        return None
 
-# Example usage
-search_image_in_milvus("query_image.jpg")
+
+# Example Usage
+query_image_path = "images/image_1.jpg"
+search_results = search_image_in_milvus(query_image_path)
