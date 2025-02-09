@@ -1,6 +1,7 @@
 import logging
 import os
 import threading
+from flask import Flask, request, jsonify
 
 import cv2
 import numpy as np
@@ -8,7 +9,7 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 
 from helpers import load_pretrained_model, IMAGE_VIDEO_MAPPING, load_annoy_index, extract_feature, is_valid_homography, \
-    is_almost_parallelogram, resize_with_aspect_ratio, overlay_video
+    is_almost_parallelogram, resize_with_aspect_ratio, overlay_video, process_and_insert_image
 
 # ------------------------ Configuration ------------------------
 
@@ -305,6 +306,33 @@ overlay_lock = threading.Lock()
 @app.route('/', methods=['GET','POST'])
 def home():
     return jsonify({'message': 'Welcome to the AR Overlay API!'})
+
+
+@app.route('/upload', methods=['POST'])
+def upload_image_video():
+    if 'image' not in request.files or 'video' not in request.files:
+        return jsonify({"error": "Both image and video files are required."}), 400
+
+    image_file = request.files['image']
+    video_file = request.files['video']
+
+    # Save the uploaded image
+    image_path = os.path.join("images", image_file.filename)
+    image_file.save(image_path)
+
+    # Save the uploaded video
+    video_path = os.path.join("videos", video_file.filename)
+    video_file.save(video_path)
+
+    # Process and insert image descriptors into Milvus
+    success = process_and_insert_image({"image_path": image_path, "video_path": video_path})
+
+    if not success:
+        return jsonify({"error": "Failed to extract descriptors from image."}), 400
+
+    return jsonify({"message": "Image and video uploaded and processed successfully."}), 200
+
+
 
 @app.route('/start-ar', methods=['POST','OPTIONS'])
 def start_ar():

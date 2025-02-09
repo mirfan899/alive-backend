@@ -7,8 +7,25 @@ import torch
 import torchvision.models as models
 import torchvision.transforms as transforms
 from annoy import AnnoyIndex
+from pymilvus import MilvusClient
 
 # Paths to input images and their associated videos
+# Connect to Milvus
+client = MilvusClient("milvus_demo.db")
+
+
+# Load collection
+collection_name = "image_collection"
+
+# Initialize ORB detector
+orb = cv2.ORB_create(nfeatures=1000,
+        scaleFactor=1.2,
+        nlevels=10,
+        edgeThreshold=15,
+        firstLevel=0,
+        WTA_K=2,
+        scoreType=cv2.ORB_HARRIS_SCORE,
+        patchSize=31)
 
 IMAGE_VIDEO_MAPPING = {
     'images/image_1.jpg': './videos/image_1.mp4',
@@ -259,4 +276,23 @@ def overlay_video(frame, frame_video, homography):
     except Exception as e:
         logging.error(f"Exception in overlay_video: {e}")
         return frame
+
+
+def process_and_insert_image(image2video:dict):
+    image = cv2.imread(image2video["image_path"], cv2.IMREAD_GRAYSCALE)
+    keypoints, descriptors = orb.detectAndCompute(image, None)
+
+    if descriptors is not None:
+        descriptors_flat = descriptors.astype(np.float32).flatten()
+
+        # Pad descriptors to match 32000 dimensions
+        if descriptors_flat.shape[0] < 32000:
+            padding = np.zeros(32000 - descriptors_flat.shape[0], dtype=np.float32)
+            descriptors_flat = np.concatenate([descriptors_flat, padding])
+
+        # Insert descriptors into Milvus
+        client.insert(collection_name=collection_name, data={"descriptors": [descriptors_flat.tolist()], "image_path": {image2video["image_path"]}, "video_path": image2video["video_path"]})
+        return True
+    else:
+        return False
 
