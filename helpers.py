@@ -296,3 +296,30 @@ def process_and_insert_image(image2video:dict):
     else:
         return False
 
+
+def search_image_in_milvus(feature, top_k=1):
+
+    if feature.any():
+        # Perform search in Milvus
+        search_params = {
+            "metric_type": "L2",  # ORB uses L2 norm for similarity
+            "params": {"nlist": 10}  # nprobe controls the search scope
+        }
+
+        results = client.search(
+            collection_name=collection_name,
+            data=[feature],  # Pass the descriptors
+            anns_field="descriptors",
+            search_params=search_params,
+            limit=top_k,
+            output_fields=["image_id", "image_path"]  # You can retrieve additional fields if needed
+        )
+
+        if results.__len__() == 0:
+            return None, None, None
+        else:
+            return results[0][0]['entity']["image_id"], results[0][0]['entity']["image_path"], results[0][0]['distance']  # Return the top results for further use
+
+    else:
+        print(f"No descriptors found.")
+        return None, None, None
