@@ -1,44 +1,81 @@
+import threading
+import queue
 import cv2
-import socketio
 import numpy as np
+import socketio
 
 # Connect to the server
 sio = socketio.Client()
-sio.connect('http://127.0.0.1:5000')
+sio.connect("http://localhost:5000")
 
-# Initialize video capture from webcam
-cap = cv2.VideoCapture(0)
+frame_lock = threading.Lock()
+processed_frame = None  # Shared variable for storing received frames
+frame_queue = queue.Queue()  # Queue to store frames before sending
 
-# Handle matched frames from the server
 @sio.on('matched_frame')
-def on_matched_frame(data):
-    """Displays matched frames received from the server."""
-    frame_data = np.frombuffer(data, np.uint8)
-    matched_frame = cv2.imdecode(frame_data, cv2.IMREAD_COLOR)
+def on_processed_frame(data):
+    """Receives processed frame from server"""
+    global processed_frame
+    try:
+        np_arr = np.frombuffer(data, np.uint8)
+        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-    if matched_frame is not None:
-        cv2.imshow('Matched Frame from Server', matched_frame)
-    else:
-        print("Failed to decode the matched frame.")
+        # Store frame for display
+        with frame_lock:
+            processed_frame = frame.copy()  # Copy reduces lock contention
+    except Exception as e:
+        print("Error displaying processed frame:", e)
 
-# Stream video frames to the server
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret or frame is None:
-        print("Failed to capture frame from camera.")
-        continue
+def capture_video():
+    """Captures video and pushes frames to queue"""
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FPS, 30)  # Set frame rate to avoid overload
 
-    # Show the captured frame
-    cv2.imshow('Captured Frame', frame)
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-    # Encode frame as JPEG
-    sio.emit('video_stream', frame.tobytes())  # Send frame to server
+        # Put frame in queue
+        if not frame_queue.full():
+            frame_queue.put(frame)
 
+    cap.release()
 
-    # Press 'q' to exit
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+def send_video():
+    """Encodes and sends frames from queue"""
+    while True:
+        if not frame_queue.empty():
+            frame = frame_queue.get()
 
-cap.release()
-cv2.destroyAllWindows()
-sio.disconnect()
+            # Encode frame to JPEG with quality 80 (faster encoding)
+            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+
+            # Emit frame to server
+            sio.emit('video_stream', buffer.tobytes())
+
+def display_video():
+    """Continuously displays processed frames received from the server"""
+    global processed_frame
+    while True:
+        with frame_lock:
+            if processed_frame is not None:
+                cv2.imshow("Processed Stream", processed_frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    print("Connected to server!")
+
+    # Start threads for video capture and sending
+    capture_thread = threading.Thread(target=capture_video, daemon=True)
+    send_thread = threading.Thread(target=send_video, daemon=True)
+
+    capture_thread.start()
+    send_thread.start()
+
+    # Start displaying processed frames
+    display_video()

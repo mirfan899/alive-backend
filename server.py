@@ -1,3 +1,4 @@
+import base64
 import logging
 import os
 
@@ -108,7 +109,8 @@ def handle_video_stream(data):
                 x, y = int(kp.pt[0]), int(kp.pt[1])
                 cv2.circle(frame_with_keypoints, (x, y), 2, (0, 255, 0), -1)  # Small dot
         # cv2.imshow('AR Overlay', frame_with_keypoints)
-        socketio.emit("matched_frame", frame_with_keypoints)
+        _, buffer = cv2.imencode('.jpg', frame_with_keypoints)
+        socketio.emit("matched_frame", buffer.tobytes())
     # Search in Annoy index for the nearest neighbor
     nearest_indices, distances = index.get_nns_by_vector(feature, 1, include_distances=True)
     if not nearest_indices:
@@ -122,8 +124,8 @@ def handle_video_stream(data):
             for kp in kp_frame:
                 x, y = int(kp.pt[0]), int(kp.pt[1])
                 cv2.circle(frame_with_keypoints, (x, y), 2, (0, 255, 0), -1)  # Small dot
-        cv2.imshow('AR Overlay', frame_with_keypoints)
-
+        _, buffer = cv2.imencode('.jpg', frame_with_keypoints)
+        socketio.emit("matched_frame", buffer.tobytes())
 
     match_idx = nearest_indices[0]
     distance = distances[0]
@@ -193,12 +195,8 @@ def handle_video_stream(data):
 
                                     # Overlay the video frame onto the detected image
                                     frame = overlay_video(frame, frame_video_resized, homography)
-
-                                    # Optional: Display a message
-                                    cv2.putText(frame, "Overlay Applied", (50, 50), cv2.FONT_HERSHEY_SIMPLEX,
-                                                1, (0, 255, 0), 2, cv2.LINE_AA)
-                                    # else:
-                                    #     logging.warning("Detected quadrilateral is not a parallelogram. Skipping overlay.")
+                                    _, buffer = cv2.imencode('.jpg', frame)
+                                    socketio.emit("matched_frame", buffer.tobytes())
                                 else:
                                     logging.warning("Homography could not be computed or is invalid.")
                             else:
@@ -221,15 +219,8 @@ def handle_video_stream(data):
             x, y = int(kp.pt[0]), int(kp.pt[1])
             cv2.circle(frame_with_keypoints, (x, y), 2, (0, 255, 0), -1)  # Small dot
 
-    # Display the processed frame with keypoints
-    # cv2.imshow('AR Overlay', frame_with_keypoints)
-    socketio.emit("matched_frame", frame_with_keypoints.tobytes())
-    # If a match is found (threshold example)
-    # if distances[0][0] < 0.5:  # Adjust threshold as needed
-    #     print("Match found! Sending frame back to client.")
-    #     _, buffer = cv2.imencode('.jpg', frame)
-    #     socketio.emit('matched_frame', buffer.tobytes())  # Stream matched frame back
-
+    _, buffer = cv2.imencode('.jpg', frame_with_keypoints)
+    socketio.emit("matched_frame", buffer.tobytes())
 
 @app.route('/')
 def homepage():
