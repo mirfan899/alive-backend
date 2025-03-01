@@ -1,15 +1,15 @@
 import logging
 import os
 import threading
-from flask import Flask, request, jsonify
 
 import cv2
 import numpy as np
 from flask import Flask, jsonify
+from flask import request
 from flask_cors import CORS
 
-from helpers import load_pretrained_model, IMAGE_VIDEO_MAPPING, load_annoy_index, extract_feature, is_valid_homography, \
-    is_almost_parallelogram, resize_with_aspect_ratio, overlay_video, process_and_insert_image, search_image_in_milvus
+from helpers import load_pretrained_model, extract_feature, is_valid_homography, \
+    resize_with_aspect_ratio, overlay_video, process_and_insert_image, search_image_in_milvus
 
 # ------------------------ Configuration ------------------------
 
@@ -26,7 +26,7 @@ logging.basicConfig(
 # Parameters
 FEATURE_DIM = 2048
 N_TREES = 50  # Increased for better accuracy
-DISTANCE_THRESHOLD = 1.5
+DISTANCE_THRESHOLD = 1.75
 VIDEO_PLAYBACK_SPEED = 1.0
 
 # Parallelogram Thresholds
