@@ -13,7 +13,7 @@ curl -X POST http://127.0.0.1:5000/upload \
   -F 'image=@/path/to/your/image.jpg' \
   -F 'video=@/path/to/your/video.mp4'
 ```
-There are two scripts i.e. vector_genedration.py is used to populate the vector db and image_search.py is used to search the 
+There are two scripts i.e. vector_generation.py is used to populate the vector db and image_search.py is used to search the 
 encoded image from db.
 
 
