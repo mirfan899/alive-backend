@@ -7,13 +7,32 @@ import torch
 import torchvision.models as models
 import torchvision.transforms as transforms
 from annoy import AnnoyIndex
-# from keras import Model
-# from keras.src.applications.resnet import ResNet50
 from pymilvus import MilvusClient
-# import tensorflow as tf
-import numpy as np
-import cv2
-import logging
+
+# Runtime/config
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+_USE_HALF = DEVICE.type == "cuda"
+
+# Enable cuDNN autotuner for fixed input size
+try:
+    torch.backends.cudnn.benchmark = True
+except Exception:
+    pass
+
+# Preprocessing pipeline (created once)
+_PREPROCESS = transforms.Compose([
+    transforms.ToPILImage(),
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225])
+])
+
+# Lazy-loaded model singleton
+_MODEL = None
+
+# Simple cache for Annoy indices
+_ANNOY_CACHE = {}
 
 # Paths to input images and their associated videos
 # Connect to Milvus
@@ -43,7 +62,11 @@ IMAGE_VIDEO_MAPPING = {
 def load_pretrained_model():
     """
     Load a pre-trained ResNet50 model and modify it to output feature vectors with adaptive pooling.
+    Lazily initializes a singleton and moves it to the best available device.
     """
+    global _MODEL
+    if _MODEL is not None:
+        return _MODEL
     try:
         model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
         # Replace the final average pooling with adaptive pooling
@@ -51,10 +74,16 @@ def load_pretrained_model():
         # Remove the final classification layer
         model = torch.nn.Sequential(*list(model.children())[:-1])
         model.eval()
-        logging.info("Pre-trained ResNet50 model loaded successfully with adaptive pooling.")
-        return model
+        if _USE_HALF:
+            model = model.to(device=DEVICE, dtype=torch.float16)
+        else:
+            model = model.to(device=DEVICE)
+        _MODEL = model
+        logging.info(f"Pre-trained ResNet50 model loaded on {DEVICE} (half={_USE_HALF}).")
+        return _MODEL
     except Exception as e:
         logging.error(f"Failed to load pre-trained model: {e}")
+        _MODEL = None
         return None
 
 
@@ -117,34 +146,45 @@ def load_pretrained_model():
 def extract_feature(model, image_input):
     """
     Extract a feature vector from an image using the provided model.
+    Falls back to loading a singleton model if None is provided.
     """
     try:
+        if model is None:
+            model = load_pretrained_model()
+            if model is None:
+                return None
+
+        # Load/convert image
         if isinstance(image_input, str):
             image = cv2.imread(image_input)
             if image is None:
                 logging.error(f"Unable to load image {image_input}.")
                 return None
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         elif isinstance(image_input, np.ndarray):
-            image = cv2.cvtColor(image_input, cv2.COLOR_BGR2RGB)
+            image = image_input
         else:
             logging.error("Unsupported image_input type.")
             return None
 
-        preprocess = transforms.Compose([
-            transforms.ToPILImage(),
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],  # ResNet normalization
-                std=[0.229, 0.224, 0.225]
-            )
-        ])
-        input_tensor = preprocess(image).unsqueeze(0)  # Add batch dimension
+        # Convert BGR->RGB only once
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        input_tensor = _PREPROCESS(image).unsqueeze(0)  # [1,3,224,224]
+
         with torch.no_grad():
-            feature = model(input_tensor).squeeze().numpy()
-        # Normalize the feature vector
-        feature = feature / np.linalg.norm(feature)
+            if _USE_HALF:
+                input_tensor = input_tensor.to(device=DEVICE, dtype=torch.float16)
+            else:
+                input_tensor = input_tensor.to(device=DEVICE)
+            feature = model(input_tensor)
+            # feature shape [1, 2048, 1, 1] or [1, 2048]
+            feature = feature.squeeze()
+            # move to CPU float32 for numpy conversion
+            feature = feature.detach().to(torch.float32).cpu().numpy()
+
+        # Normalize with epsilon to avoid division by zero
+        norm = np.linalg.norm(feature) + 1e-12
+        feature = feature / norm
         return feature
     except Exception as e:
         logging.error(f"Exception in extract_feature: {e}")
@@ -170,8 +210,14 @@ def create_annoy_index(features, feature_dim=2048, n_trees=100):
 def load_annoy_index(image_paths, model, feature_dim=2048, n_trees=100):
     """
     Load images, extract features, and create an Annoy index.
+    Uses a simple in-process cache to avoid rebuilding when the same inputs are provided.
     """
     try:
+        key = (tuple(image_paths), feature_dim, n_trees)
+        cached = _ANNOY_CACHE.get(key)
+        if cached is not None:
+            return cached
+
         features = []
         id_to_video = {}
         for idx, img_path in enumerate(image_paths):
@@ -192,7 +238,9 @@ def load_annoy_index(image_paths, model, feature_dim=2048, n_trees=100):
         index = create_annoy_index(features, feature_dim=feature_dim, n_trees=n_trees)
         # Adjust id_to_video to match the Annoy index item indices
         adjusted_id_to_video = {i: id_to_video[i] for i in range(len(features))}
-        return index, adjusted_id_to_video
+        result = (index, adjusted_id_to_video)
+        _ANNOY_CACHE[key] = result
+        return result
     except Exception as e:
         logging.error(f"Exception in load_annoy_index: {e}")
         return None, None
@@ -202,10 +250,12 @@ def load_annoy_index(image_paths, model, feature_dim=2048, n_trees=100):
 def resize_with_aspect_ratio(image, width=None, height=None, inter=cv2.INTER_LINEAR):
     """
     Resizes an image while maintaining aspect ratio.
+    Previous behavior: when both width and height are provided, preserve aspect ratio based on the specified dimension.
     """
     (h, w) = image.shape[:2]
     if width is None and height is None:
         return image
+    # Preserve aspect ratio using whichever dimension is provided (width takes precedence if both are provided)
     if width is None:
         r = height / float(h)
         dim = (int(w * r), height)
@@ -241,13 +291,14 @@ def order_points_clockwise(pts):
 
 def is_almost_parallelogram(dst, thresholds):
     try:
-        if dst.shape != (4, 1, 2):
-            logging.warning(f"Invalid shape for quadrilateral points: {dst.shape}")
+        # Validate shape early
+        if dst is None or dst.shape != (4, 1, 2):
+            logging.warning(f"Invalid shape for quadrilateral points: {None if dst is None else dst.shape}")
             return False
 
-        pts = dst.reshape(4, 2)
-        ordered_pts = order_points_clockwise(pts)
-        pt1, pt2, pt3, pt4 = ordered_pts
+        # Order and flatten points
+        pts = dst.reshape(4, 2).astype(np.float32)
+        pt1, pt2, pt3, pt4 = order_points_clockwise(pts)
 
         length1 = calculate_length(pt1, pt2)
         length2 = calculate_length(pt3, pt4)

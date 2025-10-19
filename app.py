@@ -38,6 +38,8 @@ parallelogram_thresholds = {
 MATCH_STABILITY_THRESHOLD = 3  # Number of consecutive frames required for a stable match
 GOOD_MATCH_DISTANCE_THRESHOLD = 35  # Adjust as needed
 
+# Feature extraction / playback gating switch
+ENABLE_PLAYBACK_GATING = True
 
 # ------------------------ Main Application ------------------------
 
@@ -129,6 +131,19 @@ def main():
         'homography': None
     }
 
+    # Playback control state
+    is_playing = False
+    playing_match_idx = -1
+    overlay_fail_count = 0
+    OVERLAY_FAIL_MAX = 30  # number of consecutive failures to exit playback
+
+    # Performance tweaks and frame throttling (disabled to revert behavior)
+    cv2.setUseOptimized(True)
+    FRAME_STRIDE = 1  # compute CNN feature every frame
+    VISUAL_STRIDE = 1  # draw keypoints every frame
+    frame_counter = 0
+    last_feature = None
+
     try:
         while True:
             ret, frame = cap.read()
@@ -136,23 +151,99 @@ def main():
                 logging.warning("Failed to grab frame from camera.")
                 break
 
-            # Extract global feature from the current frame
-            feature = extract_feature(model, frame)
-            if feature is None:
-                logging.warning("Failed to extract features from the current frame.")
-                # Still compute keypoints for visualization
-                gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                kp_frame, desc_frame = orb.detectAndCompute(gray_frame, None)
-                # Draw keypoints as center points (dots)
-                frame_with_keypoints = frame.copy()
-                if kp_frame is not None:
-                    for kp in kp_frame:
-                        x, y = int(kp.pt[0]), int(kp.pt[1])
-                        cv2.circle(frame_with_keypoints, (x, y), 2, (0, 255, 0), -1)  # Small dot
+            # If a video is currently playing with a stable match, skip CNN feature extraction (disabled by flag)
+            if ENABLE_PLAYBACK_GATING and is_playing and (playing_match_idx in video_caps) and (video_caps.get(playing_match_idx) is not None):
+                video_cap = video_caps.get(playing_match_idx)
+
+                # Read next frame from the video
+                ret_video, frame_video = video_cap.read()
+                if not ret_video:
+                    video_path = id_to_video[playing_match_idx]
+                    logging.info(f"Reached end of video {video_path}. Restarting.")
+                    video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret_video, frame_video = video_cap.read()
+
+                if ret_video:
+                    # ORB-based homography and overlay (no CNN)
+                    gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    kp_frame, desc_frame = orb.detectAndCompute(gray_frame, None)
+                    if desc_frame is not None and playing_match_idx in image_kp_desc:
+                        kp_image, desc_image = image_kp_desc.get(playing_match_idx, (None, None))
+                        if desc_image is not None:
+                            matches = bf.match(desc_image, desc_frame)
+                            matches = sorted(matches, key=lambda x: x.distance)
+                            good_matches = [m for m in matches if m.distance < GOOD_MATCH_DISTANCE_THRESHOLD]
+
+                            if len(good_matches) > GOOD_MATCH_DISTANCE_THRESHOLD:
+                                src_pts = np.float32([kp_image[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+                                dst_pts = np.float32([kp_frame[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+                                homography, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+                                if homography is not None and is_valid_homography(homography):
+                                    overlay_fail_count = 0
+                                    h_img, w_img = cv2.imread(image_paths[playing_match_idx], cv2.IMREAD_GRAYSCALE).shape
+                                    frame_video_resized = resize_with_aspect_ratio(frame_video, width=w_img, height=h_img)
+                                    frame = overlay_video(frame, frame_video_resized, homography)
+                                    cv2.putText(frame, "Overlay Applied", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+                                else:
+                                    overlay_fail_count += 1
+                            else:
+                                overlay_fail_count += 1
+                        else:
+                            overlay_fail_count += 1
+                    else:
+                        overlay_fail_count += 1
+                else:
+                    overlay_fail_count += 1
+
+                # Visualization throttled as before
+                if frame_counter % VISUAL_STRIDE == 0:
+                    gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    kp_frame_vis, _ = orb.detectAndCompute(gray_frame, None)
+                    frame_with_keypoints = frame.copy()
+                    if kp_frame_vis is not None:
+                        for kp in kp_frame_vis:
+                            x, y = int(kp.pt[0]), int(kp.pt[1])
+                            cv2.circle(frame_with_keypoints, (x, y), 2, (0, 255, 0), -1)
+                else:
+                    frame_with_keypoints = frame
+
                 cv2.imshow('AR Overlay', frame_with_keypoints)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
+
+                # If overlay has failed for too many consecutive frames, resume CNN extraction
+                if overlay_fail_count > OVERLAY_FAIL_MAX:
+                    logging.info("Overlay lost. Resuming feature extraction.")
+                    is_playing = False
+                    playing_match_idx = -1
+                    overlay_fail_count = 0
+                    current_match['idx'] = -1
+                    current_match['count'] = 0
+
+                # Skip the rest of the loop (no CNN feature extraction while playing)
                 continue
+
+            # Extract global feature from the current frame (throttled)
+            frame_counter += 1
+            if (frame_counter % FRAME_STRIDE == 0) or (last_feature is None):
+                computed_feature = extract_feature(model, frame)
+                if computed_feature is None:
+                    logging.warning("Failed to extract features from the current frame.")
+                    # Still compute keypoints for visualization (throttled later)
+                    gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    kp_frame, desc_frame = orb.detectAndCompute(gray_frame, None)
+                    frame_with_keypoints = frame.copy()
+                    if kp_frame is not None:
+                        for kp in kp_frame:
+                            x, y = int(kp.pt[0]), int(kp.pt[1])
+                            cv2.circle(frame_with_keypoints, (x, y), 2, (0, 255, 0), -1)
+                    cv2.imshow('AR Overlay', frame_with_keypoints)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+                    continue
+                else:
+                    last_feature = computed_feature
+            feature = last_feature
 
             # Search in Annoy index for the nearest neighbor
             nearest_indices, distances = index.get_nns_by_vector(feature, 1, include_distances=True)
@@ -189,6 +280,10 @@ def main():
                     video_path = id_to_video[best_match_idx]
                     video_cap = video_caps.get(best_match_idx, None)
                     if video_cap is not None:
+                        # Enter playback mode: pause CNN extraction in subsequent frames
+                        is_playing = True
+                        playing_match_idx = best_match_idx
+                        overlay_fail_count = 0
                         # Read next frame from the video
                         ret_video, frame_video = video_cap.read()
                         if not ret_video:
@@ -261,18 +356,21 @@ def main():
                 current_match['idx'] = -1
                 current_match['count'] = 0
 
-            # Detect keypoints on every frame for visualization
-            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            kp_frame, desc_frame = orb.detectAndCompute(gray_frame, None)
+            # Detect keypoints for visualization (throttled)
+            if frame_counter % VISUAL_STRIDE == 0:
+                gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                kp_frame, desc_frame = orb.detectAndCompute(gray_frame, None)
 
-            # Draw keypoints as center points (dots) on the camera frame for visualization
-            frame_with_keypoints = frame.copy()
-            if kp_frame is not None:
-                for kp in kp_frame:
-                    x, y = int(kp.pt[0]), int(kp.pt[1])
-                    cv2.circle(frame_with_keypoints, (x, y), 2, (0, 255, 0), -1)  # Small dot
+                # Draw keypoints as center points (dots) on the camera frame for visualization
+                frame_with_keypoints = frame.copy()
+                if kp_frame is not None:
+                    for kp in kp_frame:
+                        x, y = int(kp.pt[0]), int(kp.pt[1])
+                        cv2.circle(frame_with_keypoints, (x, y), 2, (0, 255, 0), -1)  # Small dot
+            else:
+                frame_with_keypoints = frame
 
-            # Display the processed frame with keypoints
+            # Display the processed frame (with keypoints every VISUAL_STRIDE frames)
             cv2.imshow('AR Overlay', frame_with_keypoints)
 
             # Exit on pressing 'q'
