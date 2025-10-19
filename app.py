@@ -22,7 +22,6 @@ logging.basicConfig(
     ]
 )
 
-
 # Parameters
 FEATURE_DIM = 2048
 N_TREES = 50  # Increased for better accuracy
@@ -217,25 +216,30 @@ def main():
 
                                     if len(good_matches) > GOOD_MATCH_DISTANCE_THRESHOLD:  # Increased threshold for better homography
                                         # Compute homography
-                                        src_pts = np.float32([kp_image[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-                                        dst_pts = np.float32([kp_frame[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+                                        src_pts = np.float32([kp_image[m.queryIdx].pt for m in good_matches]).reshape(
+                                            -1, 1, 2)
+                                        dst_pts = np.float32([kp_frame[m.trainIdx].pt for m in good_matches]).reshape(
+                                            -1, 1, 2)
                                         homography, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
                                         if homography is not None and is_valid_homography(homography):
                                             logging.info("Homography computed successfully.")
 
                                             # Define the corners of the image
-                                            h_img, w_img = cv2.imread(image_paths[best_match_idx], cv2.IMREAD_GRAYSCALE).shape
-                                            pts = np.float32([[0, 0], [w_img, 0], [w_img, h_img], [0, h_img]]).reshape(-1, 1, 2)
+                                            h_img, w_img = cv2.imread(image_paths[best_match_idx],
+                                                                      cv2.IMREAD_GRAYSCALE).shape
+                                            pts = np.float32([[0, 0], [w_img, 0], [w_img, h_img], [0, h_img]]).reshape(
+                                                -1, 1, 2)
                                             dst = cv2.perspectiveTransform(pts, homography)
 
                                             # Validate if the detected quadrilateral is almost a parallelogram
                                             # if is_almost_parallelogram(dst, parallelogram_thresholds):
-                                                # Draw the detected region on the frame in green
+                                            # Draw the detected region on the frame in green
                                             if dst is not None and len(dst) == 4:
                                                 cv2.polylines(frame, [np.int32(dst)], True, (0, 255, 0), 3, cv2.LINE_AA)
 
                                             # Resize the video frame to match the detected image's size
-                                            frame_video_resized = resize_with_aspect_ratio(frame_video, width=w_img, height=h_img)
+                                            frame_video_resized = resize_with_aspect_ratio(frame_video, width=w_img,
+                                                                                           height=h_img)
                                             logging.debug(f"Resized video frame to: {frame_video_resized.shape}")
 
                                             # Overlay the video frame onto the detected image
@@ -291,10 +295,11 @@ def main():
         cv2.destroyAllWindows()
         logging.info("Released all resources and closed windows.")
 
+
 # ------------------------ Flask API Setup ------------------------
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "https://alive-frontend-omega.vercel.app"}})
+# CORS(app, resources={r"/*": {"origins": "https://alive-frontend-omega.vercel.app"}})
 
 # Global variables to track initialization
 index = None
@@ -303,7 +308,8 @@ initialization_success = False
 initialization_error = None
 overlay_lock = threading.Lock()
 
-@app.route('/', methods=['GET','POST'])
+
+@app.route('/', methods=['GET', 'POST'])
 def home():
     return jsonify({'message': 'Welcome to the AR Overlay API!'})
 
@@ -333,8 +339,7 @@ def upload_image_video():
     return jsonify({"message": "Image and video uploaded and processed successfully."}), 200
 
 
-
-@app.route('/start-ar', methods=['POST','OPTIONS'])
+@app.route('/start-ar', methods=['POST', 'OPTIONS', "GET"])
 def start_ar():
     global index, id_to_video, initialization_success, initialization_error
     try:
@@ -355,6 +360,7 @@ def start_ar():
     except Exception as e:
         logging.error(f"Error in /start-ar endpoint: {e}")
         return jsonify({'status': 'Failed to start AR Overlay', 'error': str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5000)

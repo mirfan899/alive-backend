@@ -7,10 +7,10 @@ import torch
 import torchvision.models as models
 import torchvision.transforms as transforms
 from annoy import AnnoyIndex
-from keras import Model
-from keras.src.applications.resnet import ResNet50
+# from keras import Model
+# from keras.src.applications.resnet import ResNet50
 from pymilvus import MilvusClient
-import tensorflow as tf
+# import tensorflow as tf
 import numpy as np
 import cv2
 import logging
@@ -58,61 +58,61 @@ def load_pretrained_model():
         return None
 
 
-def load_pretrained_model_tf():
-    # Load the ResNet50 model with pre-trained ImageNet weights
-    base_model = ResNet50(weights='imagenet', include_top=False)
+# def load_pretrained_model_tf():
+#     # Load the ResNet50 model with pre-trained ImageNet weights
+#     base_model = ResNet50(weights='imagenet', include_top=False)
+#
+#     # Replace the global average pooling with adaptive pooling (equivalent to PyTorch)
+#     # TensorFlow does not have AdaptiveAvgPool2d, but GlobalAveragePooling2D is functionally similar
+#     x = tf.keras.layers.GlobalAveragePooling2D()(base_model.output)
+#
+#     # Create the modified model without classification layer
+#     model = Model(inputs=base_model.input, outputs=x)
+#     return model
 
-    # Replace the global average pooling with adaptive pooling (equivalent to PyTorch)
-    # TensorFlow does not have AdaptiveAvgPool2d, but GlobalAveragePooling2D is functionally similar
-    x = tf.keras.layers.GlobalAveragePooling2D()(base_model.output)
 
-    # Create the modified model without classification layer
-    model = Model(inputs=base_model.input, outputs=x)
-    return model
-
-
-def extract_feature_tf(model, image_input):
-    """
-    Extract a feature vector from an image using the provided TensorFlow/Keras model.
-    """
-    try:
-        # Load and convert image
-        if isinstance(image_input, str):
-            image = cv2.imread(image_input)
-            if image is None:
-                logging.error(f"Unable to load image {image_input}.")
-                return None
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        elif isinstance(image_input, np.ndarray):
-            image = cv2.cvtColor(image_input, cv2.COLOR_BGR2RGB)
-        else:
-            logging.error("Unsupported image_input type.")
-            return None
-
-        # Convert image to TensorFlow tensor and preprocess
-        image = tf.convert_to_tensor(image, dtype=tf.float32)
-        image = tf.image.resize(image, (224, 224))  # Resize
-        image = image / 255.0  # Scale to [0,1]
-
-        # Normalize using ImageNet mean & std
-        mean = tf.constant([0.485, 0.456, 0.406], dtype=tf.float32)
-        std = tf.constant([0.229, 0.224, 0.225], dtype=tf.float32)
-        image = (image - mean) / std
-
-        # Add batch dimension
-        input_tensor = tf.expand_dims(image, axis=0)
-
-        # Extract feature using the model
-        feature = model(input_tensor, training=False)
-        feature = tf.squeeze(feature).numpy()
-
-        # Normalize the feature vector
-        feature = feature / np.linalg.norm(feature)
-
-        return feature
-    except Exception as e:
-        logging.error(f"Exception in extract_feature: {e}")
-        return None
+# def extract_feature_tf(model, image_input):
+#     """
+#     Extract a feature vector from an image using the provided TensorFlow/Keras model.
+#     """
+#     try:
+#         # Load and convert image
+#         if isinstance(image_input, str):
+#             image = cv2.imread(image_input)
+#             if image is None:
+#                 logging.error(f"Unable to load image {image_input}.")
+#                 return None
+#             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+#         elif isinstance(image_input, np.ndarray):
+#             image = cv2.cvtColor(image_input, cv2.COLOR_BGR2RGB)
+#         else:
+#             logging.error("Unsupported image_input type.")
+#             return None
+#
+#         # Convert image to TensorFlow tensor and preprocess
+#         image = tf.convert_to_tensor(image, dtype=tf.float32)
+#         image = tf.image.resize(image, (224, 224))  # Resize
+#         image = image / 255.0  # Scale to [0,1]
+#
+#         # Normalize using ImageNet mean & std
+#         mean = tf.constant([0.485, 0.456, 0.406], dtype=tf.float32)
+#         std = tf.constant([0.229, 0.224, 0.225], dtype=tf.float32)
+#         image = (image - mean) / std
+#
+#         # Add batch dimension
+#         input_tensor = tf.expand_dims(image, axis=0)
+#
+#         # Extract feature using the model
+#         feature = model(input_tensor, training=False)
+#         feature = tf.squeeze(feature).numpy()
+#
+#         # Normalize the feature vector
+#         feature = feature / np.linalg.norm(feature)
+#
+#         return feature
+#     except Exception as e:
+#         logging.error(f"Exception in extract_feature: {e}")
+#         return None
 
 def extract_feature(model, image_input):
     """
